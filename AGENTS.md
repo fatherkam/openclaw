@@ -1,5 +1,24 @@
 # Repository Guidelines
 
+## Before Starting Any New Feature
+
+**Stop and research before coding.** When implementing a new feature or modifying existing functionality:
+
+1. **Identify the relevant subsystem** - Check the sections below (e.g., "Model Selection and Alias System") for documented architecture
+2. **Read the key source files** - Each section lists the files involved; read them to understand existing patterns
+3. **Understand the data flow** - Trace how data moves through the system before proposing changes
+4. **Work WITH the architecture** - If something seems hard, you're probably fighting the design. Ask yourself: "Is there an existing mechanism for this?" (e.g., config allowlists, alias indexes, session persistence)
+5. **Verify external dependencies** - For third-party APIs, check their actual documentation for correct endpoints/model IDs; don't assume based on naming conventions
+
+**Common mistakes to avoid:**
+
+- Adding code to bypass existing validation (allowlists, permissions) instead of using proper config
+- Assuming external API model IDs match HuggingFace/marketing names
+- Making changes without reading the files that will be affected
+- Proposing "V2" copies instead of extending existing patterns
+
+---
+
 - Repo: https://github.com/openclaw/openclaw
 - GitHub issues/comments/PR comments: use literal multiline strings or `-F - <<'EOF'` (or $'...') for real newlines; never embed "\\n".
 
@@ -176,3 +195,348 @@
 - Publish: `npm publish --access public --otp="<otp>"` (run from the package dir).
 - Verify without local npmrc side effects: `npm view <pkg> version --userconfig "$(mktemp)"`.
 - Kill the tmux session after publish.
+
+## Bug Fix Workflow (Research → Fix → Deploy → Verify)
+
+When the user reports a bug, follow this end-to-end workflow. Do NOT stop after committing code -- the fix is not done until the gateway is restarted and verified.
+
+### 1. Research
+
+- Read this file for documented architecture of the relevant subsystem
+- Read the key source files listed in the subsystem section
+- Trace the data flow end-to-end; identify where the chain breaks
+- Check runtime state: config (`~/.openclaw/openclaw.json`), job store (`~/.openclaw/cron/jobs.json`), run logs (`~/.openclaw/cron/runs/*.jsonl`), session store (`~/.openclaw/agents/*/sessions/sessions.json`)
+
+### 2. Diagnose
+
+- Draw a mermaid diagram of the expected flow
+- Validate each step: what should have happened vs. what actually happened
+- Identify the root cause with high confidence before writing any code
+
+### 3. Implement
+
+- Make the minimal code change that fixes the root cause
+- Run relevant tests: `npx vitest run <test-files>`
+- Type-check: `npx tsc --noEmit` (ignore pre-existing UI rootDir errors)
+
+### 4. Commit
+
+- Use `scripts/committer "<msg>" <file...>` to commit only the changed files
+
+### 5. Build and Restart
+
+This is critical -- code changes have NO effect until built and deployed:
+
+```bash
+# Build TypeScript to dist/
+./node_modules/.bin/tsdown
+
+# Post-build steps
+node --import tsx scripts/canvas-a2ui-copy.ts
+node --import tsx scripts/copy-hook-metadata.ts
+node --import tsx scripts/write-build-info.ts
+node --import tsx scripts/write-cli-compat.ts
+
+# If the Control UI also needs building (chat/web interface):
+node scripts/ui.js build
+
+# Restart the gateway
+node openclaw.mjs daemon restart
+```
+
+### 6. Verify
+
+```bash
+# Check gateway is healthy
+node openclaw.mjs channels status --probe
+
+# Check cron is active
+node openclaw.mjs cron status
+
+# Force-run a job to test
+node openclaw.mjs cron run <job-id> --force
+
+# Check session was updated (confirms heartbeat processed the event)
+ls -lt ~/.openclaw/agents/main/sessions/sessions.json
+```
+
+### 7. Notify
+
+Tell the user the fix is deployed and ready to test. Include what was changed, what was verified, and when the next scheduled run will happen.
+
+---
+
+## Cron and Heartbeat System
+
+### Overview
+
+OpenClaw has two cooperating subsystems for scheduled work:
+
+- **Cron Service**: Timer-based job scheduler that fires at configured times
+- **Heartbeat Runner**: Periodic agent invocation that processes queued system events
+
+For `sessionTarget: "main"` jobs, cron does NOT run the agent directly. It enqueues a system event and requests a heartbeat. The heartbeat then runs the LLM, which sees the system event in its prompt.
+
+### Key Files
+
+| File                                      | Purpose                                                       |
+| ----------------------------------------- | ------------------------------------------------------------- |
+| `src/cron/service/timer.ts`               | Timer arming, job execution, wake modes                       |
+| `src/cron/service/state.ts`               | State types, deps interface, event types                      |
+| `src/cron/service/ops.ts`                 | CRUD operations (add/update/remove/run)                       |
+| `src/cron/service/jobs.ts`                | Due-job detection, stuck-run protection, schedule computation |
+| `src/cron/schedule.ts`                    | `computeNextRunAtMs()` using `croner` package                 |
+| `src/cron/store.ts`                       | File-based persistence (`~/.openclaw/cron/jobs.json`)         |
+| `src/cron/run-log.ts`                     | Append-only JSONL run history per job                         |
+| `src/cron/isolated-agent/run.ts`          | Isolated session agent execution                              |
+| `src/cron/types.ts`                       | All TypeScript types (schedules, jobs, payloads)              |
+| `src/gateway/server-cron.ts`              | CronService initialization with gateway deps                  |
+| `src/infra/heartbeat-runner.ts`           | `runHeartbeatOnce()`, `startHeartbeatRunner()`                |
+| `src/infra/heartbeat-wake.ts`             | `requestHeartbeatNow()`, coalescing, handler registry         |
+| `src/infra/system-events.ts`              | In-memory session-scoped event queue                          |
+| `src/auto-reply/reply/session-updates.ts` | Drains system events into LLM prompt                          |
+| `src/auto-reply/heartbeat.ts`             | `isHeartbeatContentEffectivelyEmpty()`                        |
+
+### Data Flow (Main Session Jobs)
+
+```
+Cron timer fires (setTimeout)
+       │
+       ▼
+executeJob() in timer.ts
+       │
+       ├── enqueueSystemEvent(text, { sessionKey })
+       │     └── Stores event in in-memory queue (NOT persisted)
+       │
+       ├── wakeMode="now" ──► runHeartbeatOnce() directly, waits up to 2 min
+       │
+       └── wakeMode="next-heartbeat" ──► requestHeartbeatNow() fire-and-forget
+             │
+             ▼
+       finish("ok") immediately (cron job done in ~5-20ms)
+             │
+             ▼
+       Heartbeat wake handler fires after 250ms coalesce
+             │
+             ▼
+       startHeartbeatRunner's run() ──► runHeartbeatOnce()
+             │
+             ▼
+       Checks: enabled? agent enabled? interval? active hours? queue empty? HEARTBEAT.md?
+             │
+             ▼
+       getReplyFromConfig(ctx) ──► prependSystemEvents() drains queue into prompt
+             │
+             ▼
+       LLM processes system event + HEARTBEAT.md tasks
+             │
+             ▼
+       deliverOutboundPayloads() ──► Telegram/channel delivery
+```
+
+### Two Job Types
+
+**Main session** (`sessionTarget: "main"`):
+
+- Payload: `systemEvent` with text
+- Enqueues into the main agent session, relies on heartbeat to process
+- Duration in run logs is just the enqueue time (~5-20ms), NOT the LLM work
+- Wake modes: `"now"` (wait for heartbeat) or `"next-heartbeat"` (fire-and-forget)
+
+**Isolated session** (`sessionTarget: "isolated"`):
+
+- Payload: `agentTurn` with message, optional model/thinking/timeout overrides
+- Runs a separate agent invocation in session `cron:<jobId>`
+- Can deliver output to a channel and/or post summary back to main session
+- Duration in run logs IS the actual agent work
+
+### Three Schedule Types
+
+| Kind      | Config                                             | Example                   |
+| --------- | -------------------------------------------------- | ------------------------- |
+| `"cron"`  | `{ expr: "0 6 * * *", tz: "America/Los_Angeles" }` | Daily 6 AM PST            |
+| `"every"` | `{ everyMs: 3600000, anchorMs?: number }`          | Every hour                |
+| `"at"`    | `{ atMs: 1735472400000 }`                          | One-shot at specific time |
+
+Cron expressions use the `croner` package (^10.0.1), standard 5-field syntax with optional timezone.
+
+### Critical Architecture Gotchas
+
+1. **System events are in-memory only.** If the gateway restarts before a heartbeat processes a cron event, the event is lost. There is no persistence for the event queue.
+
+2. **`heartbeat.every: "0m"` disables ALL heartbeats** including on-demand wakes from cron. The interval check in `runHeartbeatOnce()` and the agent count in `startHeartbeatRunner` both gate on this. Explicit wakes (cron, exec-event) bypass these checks since the fix in `c346d60a3`.
+
+3. **Cron "ok" status does not mean the agent ran.** For `next-heartbeat` mode, the cron job finishes in milliseconds after enqueueing. Check session `updatedAt` timestamps to verify the heartbeat actually processed the event.
+
+4. **Empty HEARTBEAT.md skips heartbeats.** `isHeartbeatContentEffectivelyEmpty()` returns true for files with only headers/empty list items. Exec-event and cron reasons are exempt from this check.
+
+5. **Stuck run protection.** Jobs with `runningAtMs` older than 2 hours are automatically cleared and re-eligible for execution.
+
+### Common Cron Debugging
+
+| Symptom                                 | Likely Cause                                           | How to Verify                                                |
+| --------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------ |
+| Run log shows "ok" but nothing happened | Heartbeat disabled or skipped                          | Check `heartbeat.every` in config; check session `updatedAt` |
+| Job never fires                         | `nextRunAtMs` in the past, gateway not running         | `openclaw cron status`; check gateway is up                  |
+| Job fires but LLM ignores the prompt    | System event drained but HEARTBEAT.md prompt conflicts | Check `~/.openclaw/workspace/HEARTBEAT.md` content           |
+| "skipped: quiet-hours"                  | Active hours config blocking                           | Check `heartbeat.activeHours` in config                      |
+| "skipped: requests-in-flight"           | Another request is processing                          | Wait or check `CommandLane.Main` queue                       |
+| Duration is 0-20ms for main jobs        | Normal for `next-heartbeat` mode                       | Check session timestamps instead                             |
+
+### Config Reference
+
+```jsonc
+// ~/.openclaw/openclaw.json
+{
+  "cron": {
+    "enabled": true, // default: true (OPENCLAW_SKIP_CRON=1 overrides)
+    "store": "~/.openclaw/cron/jobs.json", // job store path
+  },
+  "agents": {
+    "defaults": {
+      "heartbeat": {
+        "every": "30m", // "0m" disables periodic heartbeats (on-demand still works)
+        "target": "last", // delivery target: "last" or channel name
+        "ackMaxChars": 200, // max chars for HEARTBEAT_OK ack
+        "activeHours": {
+          // optional time window
+          "start": "07:00",
+          "end": "23:00",
+          "timezone": "user", // "user", "local", or IANA timezone
+        },
+      },
+    },
+  },
+}
+```
+
+### CLI Quick Reference
+
+```bash
+openclaw cron status                          # scheduler status + next wake time
+openclaw cron list [--all] [--json]           # list jobs (--all includes disabled)
+openclaw cron run <id> [--force]              # execute a job now
+openclaw cron add --name "..." --cron "..." --tz "..." --session main --system-event "..."
+openclaw cron remove <id>
+```
+
+---
+
+## Model Selection and Alias System
+
+### Overview
+
+OpenClaw supports switching LLM providers/models via inline directives (`/model provider/model-id`) or shorthand aliases (`/x`, `/sonnet`, `/kimi`).
+
+### Key Files
+
+| File                                                 | Purpose                                                                  |
+| ---------------------------------------------------- | ------------------------------------------------------------------------ |
+| `src/config/defaults.ts`                             | `DEFAULT_MODEL_ALIASES` - built-in shortcut mappings                     |
+| `src/agents/model-selection.ts`                      | Alias index building, model resolution, allowlist checking               |
+| `src/agents/models-config.providers.ts`              | Provider configs (base URLs, API types, model catalogs)                  |
+| `src/auto-reply/model.ts`                            | `extractModelDirective()` - parses `/model` and `/<alias>` from messages |
+| `src/auto-reply/reply/directive-handling.persist.ts` | Persists model changes to session                                        |
+| `src/auto-reply/reply/get-reply-directives.ts`       | Main directive resolution orchestration                                  |
+
+### Two Separate Concepts: Aliases vs Allowlist
+
+**Aliases** (convenient names) and **allowlist** (permitted models) are independent:
+
+1. **Aliases** defined in two places:
+   - `DEFAULT_MODEL_ALIASES` in `src/config/defaults.ts` (built-in)
+   - `agents.defaults.models[].alias` in user config (user-defined overrides)
+
+2. **Allowlist** - The keys of `agents.defaults.models` in user config (`~/.openclaw/openclaw.json`):
+   ```json
+   "models": {
+     "anthropic/claude-sonnet-4-5": { "alias": "sonnet" },
+     "moonshot/kimi-k2-0905-preview": { "alias": "xo" }
+   }
+   ```
+   Only models listed here can be used. If empty, all models are allowed.
+
+**Critical**: Adding an alias to `DEFAULT_MODEL_ALIASES` does NOT automatically allow the model. Users must also add the model to their config's `models` object.
+
+### Model Resolution Flow
+
+```
+User message: "Hello /xo"
+         │
+         ▼
+extractModelDirective()      → Extracts "xo" from message
+         │
+         ▼
+parseInlineDirectives()      → Sets hasModelDirective=true, rawModelDirective="xo"
+         │
+         ▼
+resolveModelRefFromString()  → Looks up "xo" in alias index
+         │                     Returns { provider: "moonshot", model: "kimi-k2-0905-preview" }
+         ▼
+buildAllowedModelSet()       → Checks if model is in user's allowlist
+         │
+         ▼
+persistInlineDirectives()    → Saves to session if allowed
+```
+
+### Adding a New Model Alias
+
+1. **Add to `DEFAULT_MODEL_ALIASES`** in `src/config/defaults.ts`:
+
+   ```typescript
+   export const DEFAULT_MODEL_ALIASES = {
+     "my-alias": "provider/model-id",
+   };
+   ```
+
+2. **Ensure provider is configured** in `src/agents/models-config.providers.ts` with correct model ID
+
+3. **User must add to their config** (`~/.openclaw/openclaw.json`):
+
+   ```json
+   "agents": { "defaults": { "models": {
+     "provider/model-id": { "alias": "my-alias" }
+   }}}
+   ```
+
+4. **Ensure API key is set** in `~/.openclaw/.env`
+
+### Tiered Model Shortcuts (`/x` series)
+
+| Shortcut  | Model                           | Tier            |
+| --------- | ------------------------------- | --------------- |
+| `/x`      | `google/gemini-3-flash-preview` | Cheapest        |
+| `/xo`     | `moonshot/kimi-k2-0905-preview` | Budget          |
+| `/xox`    | `moonshot/kimi-k2-thinking`     | Mid (reasoning) |
+| `/xoxo`   | `google/gemini-3-pro-preview`   | Mid-High        |
+| `/xoxox`  | `anthropic/claude-sonnet-4-5`   | High            |
+| `/xoxoxo` | `anthropic/claude-opus-4-5`     | Premium         |
+
+### Common Errors
+
+| Error                           | Cause                               | Fix                                |
+| ------------------------------- | ----------------------------------- | ---------------------------------- |
+| "Model not allowed"             | Model not in user's `models` config | Add to `~/.openclaw/openclaw.json` |
+| "HTTP 404: Not found the model" | Wrong model ID for provider's API   | Check provider docs for exact ID   |
+| "Invalid Authentication"        | API key missing/invalid             | Check `~/.openclaw/.env`           |
+| Alias not recognized            | Not in `DEFAULT_MODEL_ALIASES`      | Add to `src/config/defaults.ts`    |
+
+### Provider-Specific Notes
+
+**Moonshot (Kimi)**
+
+- Base URL: `https://api.moonshot.ai/v1`
+- API model IDs differ from HuggingFace names:
+  - `kimi-k2-0905-preview` (NOT `kimi-k2-instruct`)
+  - `kimi-k2-thinking`
+  - `kimi-k2-0711-preview`
+- Env var: `MOONSHOT_API_KEY`
+
+**Google (Gemini)**
+
+- Models use `-preview` suffix: `gemini-3-flash-preview`, `gemini-3-pro-preview`
+- `normalizeGoogleModelId()` handles normalization
+
+**Anthropic**
+
+- `normalizeAnthropicModelId()` handles shortcuts like `opus-4.5` → `claude-opus-4-5`
