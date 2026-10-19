@@ -59,6 +59,50 @@ export type HumanMentionWebPush = {
   isCurrent: () => boolean;
 };
 
+const AGENT_FINISHED_EXCERPT_MAX = 140;
+
+function cleanExcerptText(text: string): string | null {
+  const clean = text.replace(/\s+/g, " ").trim();
+  if (!clean) {
+    return null;
+  }
+  return clean.length > AGENT_FINISHED_EXCERPT_MAX
+    ? `${clean.slice(0, AGENT_FINISHED_EXCERPT_MAX - 1)}…`
+    : clean;
+}
+
+/**
+ * First readable text of the final assistant message, for agent-finished push
+ * previews. Returns null when the message carries no human-readable text so
+ * the generic body stands in. Consumed only for non-private detail levels by
+ * the ordinary identifiedBody gate in the delivery path.
+ */
+function assistantExcerptFromFinalMessage(message: unknown): string | null {
+  if (typeof message === "string") {
+    return cleanExcerptText(message);
+  }
+  if (!isRecord(message)) {
+    return null;
+  }
+  if (typeof message.text === "string") {
+    return cleanExcerptText(message.text);
+  }
+  if (typeof message.content === "string") {
+    return cleanExcerptText(message.content);
+  }
+  if (Array.isArray(message.content)) {
+    for (const block of message.content) {
+      if (isRecord(block) && typeof block.text === "string") {
+        const excerpt = cleanExcerptText(block.text);
+        if (excerpt) {
+          return excerpt;
+        }
+      }
+    }
+  }
+  return null;
+}
+
 function resolveEventWebPushNotification(
   event: string,
   payload: unknown,
@@ -85,10 +129,14 @@ function resolveEventWebPushNotification(
     !isTranscriptOnlyOpenClawAssistantMessage(value.message)
   ) {
     const runId = normalizeWebPushDisplayLabel(value.runId) ?? "finished";
+    const excerpt = assistantExcerptFromFinalMessage(value.message);
+    const agentLabel = normalizeWebPushDisplayLabel(value.agentId);
+    const identifiedBody = excerpt && agentLabel ? `${agentLabel}: ${excerpt}` : excerpt;
     return {
       category: "agent-finished",
       title: "OpenClaw agent finished",
       body: "An agent completed its response.",
+      ...(identifiedBody ? { identifiedBody } : {}),
       tag: `openclaw-agent-finished-${runId}`,
     };
   }

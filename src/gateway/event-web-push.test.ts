@@ -262,6 +262,53 @@ describe("event Web Push classification", () => {
     await expectPayload({ tag: "openclaw-agent-finished-run-1", url: "sessions" });
   });
 
+  it("carries the final assistant text as the identified body", async () => {
+    const delivery = createDelivery();
+    finishAgent(delivery, {
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "Deploy finished, tests green." }],
+      },
+    });
+    await expectPayload({ body: "Deploy finished, tests green." });
+  });
+
+  it("prefixes the agent label when the payload identifies the agent", async () => {
+    const delivery = createDelivery();
+    finishAgent(
+      delivery,
+      {
+        agentId: "research",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Deploy finished, tests green." }],
+        },
+      },
+      { agentId: "research", sessionKeys: ["agent:research:thread.1"] },
+    );
+    await expectPayload({ body: "research: Deploy finished, tests green." });
+  });
+
+  it("truncates long final replies in the identified body", async () => {
+    const delivery = createDelivery();
+    const long = "Word one two three four five six seven eight nine ten. ".repeat(6);
+    finishAgent(delivery, {
+      message: { role: "assistant", content: [{ type: "text", text: long }] },
+    });
+    await vi.waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
+    const body = mocks.send.mock.calls[0]?.[0].payload.body as string;
+    expect(body.length).toBeLessThanOrEqual(140);
+    expect(body.endsWith("…")).toBe(true);
+  });
+
+  it("keeps the generic body when the final message carries no readable text", async () => {
+    const delivery = createDelivery();
+    finishAgent(delivery, {
+      message: { role: "assistant", content: [{ type: "text", text: "   " }] },
+    });
+    await expectPayload({ body: "An agent completed its response." });
+  });
+
   it.each([false, true])("joins session publication (unknown: %s)", async (unknown) => {
     const sessionKey = "agent:main:publication";
     const databaseIdentity = "synthetic-web-push-publication";
