@@ -44,6 +44,7 @@ type EventNotification = {
   title: string;
   body: string;
   identifiedBody?: string;
+  detailedBody?: string;
   tag: string;
   path?: string;
 };
@@ -131,12 +132,14 @@ function resolveEventWebPushNotification(
     const runId = normalizeWebPushDisplayLabel(value.runId) ?? "finished";
     const excerpt = assistantExcerptFromFinalMessage(value.message);
     const agentLabel = normalizeWebPushDisplayLabel(value.agentId);
-    const identifiedBody = excerpt && agentLabel ? `${agentLabel}: ${excerpt}` : excerpt;
+    const detailedBody = excerpt
+      ? cleanExcerptText(agentLabel ? `${agentLabel}: ${excerpt}` : excerpt)
+      : null;
     return {
       category: "agent-finished",
       title: "OpenClaw agent finished",
       body: "An agent completed its response.",
-      ...(identifiedBody ? { identifiedBody } : {}),
+      ...(detailedBody ? { detailedBody } : {}),
       tag: `openclaw-agent-finished-${runId}`,
     };
   }
@@ -280,8 +283,12 @@ export function createEventWebPushDelivery(params: {
             const body =
               preferences.detailLevel === "private"
                 ? notification.body
-                : (notification.identifiedBody ??
-                  (agentLabel ? `${agentLabel}: ${notification.body}` : notification.body));
+                : preferences.detailLevel === "detailed"
+                  ? (notification.detailedBody ??
+                    notification.identifiedBody ??
+                    (agentLabel ? `${agentLabel}: ${notification.body}` : notification.body))
+                  : (notification.identifiedBody ??
+                    (agentLabel ? `${agentLabel}: ${notification.body}` : notification.body));
             const icon = preferences.detailLevel === "private" ? undefined : agentIcon;
             const key = JSON.stringify({ title, body, icon });
             const group = groups.get(key) ?? { title, body, icon, subscriptions: [] };

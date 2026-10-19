@@ -159,6 +159,12 @@ const setSubscriptions = (...subscriptions: BoundWebPushSubscription[]) =>
   mocks.subscriptions.mockResolvedValue(subscriptions);
 const setPaired = (...paired: ReturnType<typeof pairedOperator>[]) =>
   mocks.pairing.mockReturnValue({ paired });
+function setBrowserDetailLevel(detailLevel: "private" | "identified" | "detailed") {
+  const subscription = makeSubscription("browser-device");
+  subscription.devicePreferences.detailLevel = detailLevel;
+  setSubscriptions(subscription);
+  setPaired(pairedOperator(subscription.deviceId));
+}
 
 function prepareSender() {
   const preparation = createDeferred<typeof mocks.send>();
@@ -262,7 +268,8 @@ describe("event Web Push classification", () => {
     await expectPayload({ tag: "openclaw-agent-finished-run-1", url: "sessions" });
   });
 
-  it("carries the final assistant text as the identified body", async () => {
+  it("carries the final assistant text in detailed notifications", async () => {
+    setBrowserDetailLevel("detailed");
     const delivery = createDelivery();
     finishAgent(delivery, {
       message: {
@@ -274,6 +281,7 @@ describe("event Web Push classification", () => {
   });
 
   it("prefixes the agent label when the payload identifies the agent", async () => {
+    setBrowserDetailLevel("detailed");
     const delivery = createDelivery();
     finishAgent(
       delivery,
@@ -289,16 +297,32 @@ describe("event Web Push classification", () => {
     await expectPayload({ body: "research: Deploy finished, tests green." });
   });
 
-  it("truncates long final replies in the identified body", async () => {
+  it("caps the combined agent label and reply in detailed notifications", async () => {
+    setBrowserDetailLevel("detailed");
     const delivery = createDelivery();
     const long = "Word one two three four five six seven eight nine ten. ".repeat(6);
     finishAgent(delivery, {
+      agentId: "research",
       message: { role: "assistant", content: [{ type: "text", text: long }] },
     });
     await vi.waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
     const body = mocks.send.mock.calls[0]?.[0].payload.body as string;
     expect(body.length).toBeLessThanOrEqual(140);
+    expect(body.startsWith("research: ")).toBe(true);
     expect(body.endsWith("…")).toBe(true);
+  });
+
+  it("keeps assistant text out of names-only agent-finished notifications", async () => {
+    setBrowserDetailLevel("identified");
+    const delivery = createDelivery();
+    finishAgent(delivery, {
+      agentId: "research",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "Sensitive response content." }],
+      },
+    });
+    await expectPayload({ body: "research: An agent completed its response." });
   });
 
   it("keeps the generic body when the final message carries no readable text", async () => {
