@@ -435,6 +435,7 @@ final class RootSidebarModel {
                 observerDigest: digest,
                 to: self.sessions,
                 activeAgentId: appModel.chatDeliveryAgentId)
+            self.mirrorShareDestinations()
         case .seqGap:
             await self.refreshSessions(appModel: appModel)
             return true
@@ -459,8 +460,20 @@ final class RootSidebarModel {
                 sessions.contains { $0.totalTokensFresh == false })
     }
 
+    /// Mirror pinned sessions into the shared app group so the Share Extension's
+    /// destination picker stays current. Main stays implicit via the relay config.
+    private func mirrorShareDestinations() {
+        let destinations = self.sessions.compactMap { entry -> ShareDestination? in
+            guard entry.pinned == true else { return nil }
+            let title = entry.label?.trimmedNonEmpty ?? entry.autoLabel?.trimmedNonEmpty
+            return ShareDestination(sessionKey: entry.key, title: title ?? entry.key)
+        }
+        ShareDestinationStore.saveDestinations(destinations)
+    }
+
     private func applyRoster(_ roster: ChatSessionRosterSnapshot) {
         self.sessions = roster.sessions
+        self.mirrorShareDestinations()
         self.isSessionRosterComplete = roster.isComplete
         guard !roster.isComplete, !roster.isCached else {
             self.sessionErrorText = nil

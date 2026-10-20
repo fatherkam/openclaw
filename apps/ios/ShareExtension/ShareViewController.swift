@@ -34,6 +34,9 @@ final class ShareViewController: UIViewController {
     private var pendingAttachments: [ShareAttachment] = []
     /// Keep omission state controller-owned so send cannot bypass the disabled UI.
     private var attachmentBlockReason: ShareAttachmentBlockReason?
+    private var relayConfig: ShareGatewayRelayConfig?
+    private var destinationOptions: [ShareDestinationOption] = []
+    private var selectedDestinationSessionKey: String?
 
     override func loadView() {
         self.view = self.composeView
@@ -46,6 +49,9 @@ final class ShareViewController: UIViewController {
         self.composeView.onCancel = { [weak self] in
             self?.extensionContext?.completeRequest(returningItems: nil)
         }
+        self.composeView.onDestinationSelected = { [weak self] index in
+            self?.handleDestinationSelected(at: index)
+        }
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -57,6 +63,7 @@ final class ShareViewController: UIViewController {
 
     private func prepareDraft() async {
         ShareGatewayRelaySettings.saveLastEvent("Share opened.")
+        self.prepareDestinations()
         self.composeView.apply(.preparing)
         let extracted = await self.extractSharedContent()
         let payload = extracted.payload
@@ -77,6 +84,47 @@ final class ShareViewController: UIViewController {
             self.composeView.apply(.ready)
             ShareGatewayRelaySettings.saveLastEvent("Share ready: draft prepared.")
         }
+    }
+
+    /// Main chat first, then the host app's pinned-session snapshot, with the
+    /// last-used destination preselected. Missing config keeps the row hidden;
+    /// the send path reports the not-connected error as before.
+    private func prepareDestinations() {
+        let config = ShareGatewayRelaySettings.loadConfigDiscardingUnscopedDeviceAuth()
+        self.relayConfig = config
+        guard let config else {
+            self.destinationOptions = []
+            self.selectedDestinationSessionKey = nil
+            self.composeView.setDestinationOptions([], selectedIndex: nil)
+            return
+        }
+        let options = ShareDestinationCatalog.options(
+            configSessionKey: config.sessionKey,
+            stored: ShareDestinationStore.loadDestinations())
+        let lastUsed = ShareDestinationStore.loadLastSelectedSessionKey()
+        let selectedIndex = ShareDestinationCatalog.resolveSelectedIndex(
+            options: options,
+            lastUsedSessionKey: lastUsed)
+        self.destinationOptions = options
+        if let selectedIndex, options.indices.contains(selectedIndex) {
+            self.selectedDestinationSessionKey = options[selectedIndex].destination.sessionKey
+        } else {
+            self.selectedDestinationSessionKey = nil
+        }
+        let mainTitle = NSLocalizedString(
+            "Main chat",
+            comment: "Share extension main chat destination")
+        let titles = options.map { option in
+            option.isMain ? mainTitle : option.destination.title
+        }
+        self.composeView.setDestinationOptions(titles, selectedIndex: selectedIndex)
+    }
+
+    private func handleDestinationSelected(at index: Int) {
+        guard self.destinationOptions.indices.contains(index) else { return }
+        let option = self.destinationOptions[index]
+        self.selectedDestinationSessionKey = option.destination.sessionKey
+        ShareDestinationStore.saveLastSelectedSessionKey(option.destination.sessionKey)
     }
 
     private func handleSendTap() {
@@ -121,7 +169,7 @@ final class ShareViewController: UIViewController {
     }
 
     private func sendMessageToGateway(_ message: String, attachments: [ShareAttachment]) async throws {
-        guard let config = ShareGatewayRelaySettings.loadConfigDiscardingUnscopedDeviceAuth() else {
+        guard let config = self.relayConfig ?? ShareGatewayRelaySettings.loadConfigDiscardingUnscopedDeviceAuth() else {
             throw Self.gatewayError(10, message: NSLocalizedString(
                 "OpenClaw is not connected to a gateway yet.",
                 comment: "Share extension missing gateway error"))
@@ -194,7 +242,7 @@ final class ShareViewController: UIViewController {
 
         let params = AgentRequestPayload(
             message: message,
-            sessionKey: config.sessionKey,
+            sessionKey: self.selectedDestinationSessionKey ?? config.sessionKey,
             thinking: "low",
             deliver: canDeliverToRoute,
             attachments: attachments.isEmpty ? nil : attachments,

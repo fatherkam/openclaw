@@ -11,6 +11,8 @@ final class ShareComposeView: UIView, UITextViewDelegate {
         static let thumbnailSize: CGFloat = 56
         static let thumbnailRadius: CGFloat = 12
         static let headerHeight: CGFloat = 48
+        static let destinationSize: CGFloat = 44
+        static let destinationRowHeight: CGFloat = 48
     }
 
     private static let accent = UIColor { traits in
@@ -21,6 +23,7 @@ final class ShareComposeView: UIView, UITextViewDelegate {
 
     var onSend: (() -> Void)?
     var onCancel: (() -> Void)?
+    var onDestinationSelected: ((Int) -> Void)?
 
     var draftText: String {
         self.textView.text ?? ""
@@ -29,6 +32,10 @@ final class ShareComposeView: UIView, UITextViewDelegate {
     private let titleLabel = UILabel()
     private let cancelButton = UIButton(configuration: .plain())
     private let hairline = UIView()
+    private let destinationsScroll = UIScrollView()
+    private let destinationsRow = UIStackView()
+    private var destinationButtons: [UIButton] = []
+    private var selectedDestinationIndex: Int?
     private let textView = UITextView()
     private let placeholderLabel = UILabel()
     private let attachmentsRow = UIStackView()
@@ -105,8 +112,83 @@ final class ShareComposeView: UIView, UITextViewDelegate {
         self.updateControls()
     }
 
-    func focusDraft() {
-        self.textView.becomeFirstResponder()
+    func setDestinationOptions(_ titles: [String], selectedIndex: Int?) {
+        for view in self.destinationsRow.arrangedSubviews {
+            view.removeFromSuperview()
+        }
+        self.destinationButtons = []
+        self.selectedDestinationIndex = selectedIndex
+        guard !titles.isEmpty else {
+            self.destinationsScroll.isHidden = true
+            return
+        }
+        for (index, title) in titles.enumerated() {
+            let button = UIButton(configuration: .plain())
+            var configuration = button.configuration
+            configuration?.contentInsets = .zero
+            configuration?.attributedTitle = Self.attributedTitle(title, style: .caption1)
+            configuration?.titleLineBreakMode = .byTruncatingTail
+            button.configuration = configuration
+            button.accessibilityIdentifier = "share-compose.destination.\(index)"
+            button.accessibilityLabel = String(
+                format: NSLocalizedString(
+                    "Send this share to %@",
+                    comment: "Share extension destination accessibility label"),
+                title)
+            button.addAction(UIAction { [weak self] _ in
+                self?.handleDestinationTap(at: index)
+            }, for: .touchUpInside)
+            button.layer.cornerRadius = Metric.destinationSize / 2
+            button.layer.cornerCurve = .continuous
+            button.layer.borderWidth = 1
+            button.clipsToBounds = true
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.widthAnchor.constraint(equalToConstant: Metric.destinationSize).isActive = true
+            button.heightAnchor.constraint(equalToConstant: Metric.destinationSize).isActive = true
+            self.destinationsRow.addArrangedSubview(button)
+            self.destinationButtons.append(button)
+        }
+        let spacer = UIView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        self.destinationsRow.addArrangedSubview(spacer)
+        self.destinationsScroll.isHidden = false
+        self.applyDestinationSelection()
+        self.applyDestinationEditability()
+    }
+
+    private func handleDestinationTap(at index: Int) {
+        guard self.destinationButtons.indices.contains(index) else { return }
+        self.selectedDestinationIndex = index
+        self.applyDestinationSelection()
+        self.onDestinationSelected?(index)
+    }
+
+    private func applyDestinationSelection() {
+        for (index, button) in self.destinationButtons.enumerated() {
+            let selected = index == self.selectedDestinationIndex
+            button.layer.borderColor = selected ? Self.accent.cgColor : UIColor.separator.cgColor
+            button.layer.borderWidth = selected ? 2 : 1
+            button.configuration?.baseForegroundColor = selected ? Self.accent : .secondaryLabel
+            button.accessibilityTraits.insert(.button)
+            if selected {
+                button.accessibilityTraits.insert(.selected)
+            } else {
+                button.accessibilityTraits.remove(.selected)
+            }
+        }
+        if let selectedDestinationIndex = self.selectedDestinationIndex,
+           self.destinationButtons.indices.contains(selectedDestinationIndex)
+        {
+            let button = self.destinationButtons[selectedDestinationIndex]
+            self.destinationsScroll.scrollRectToVisible(button.frame, animated: false)
+        }
+    }
+
+    private func applyDestinationEditability() {
+        let controls = ShareComposeControlState.resolve(status: self.status, hasDraftText: true)
+        for button in self.destinationButtons {
+            button.isEnabled = controls.isEditable
+        }
     }
 
     func textViewDidChange(_ textView: UITextView) {
@@ -129,6 +211,9 @@ final class ShareComposeView: UIView, UITextViewDelegate {
         self.cancelButton.isEnabled = controls.isCancelEnabled
         self.textView.isEditable = controls.isEditable
         self.placeholderLabel.isHidden = !self.draftText.isEmpty
+        for button in self.destinationButtons {
+            button.isEnabled = controls.isEditable
+        }
     }
 
     private func showFooter(text: String, icon: (name: String, tint: UIColor)?) {
@@ -189,6 +274,13 @@ final class ShareComposeView: UIView, UITextViewDelegate {
         self.attachmentsRow.spacing = 8
         self.attachmentsRow.isHidden = true
 
+        self.destinationsScroll.showsHorizontalScrollIndicator = false
+        self.destinationsScroll.alwaysBounceHorizontal = false
+        self.destinationsScroll.isHidden = true
+        self.destinationsRow.axis = .horizontal
+        self.destinationsRow.spacing = 10
+        self.destinationsRow.alignment = .center
+
         self.statusSpinner.hidesWhenStopped = true
         self.statusIcon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(textStyle: .footnote)
         self.statusIcon.isHidden = true
@@ -224,6 +316,7 @@ final class ShareComposeView: UIView, UITextViewDelegate {
         self.statusContainer.addSubview(self.statusStack)
 
         let contentStack = UIStackView(arrangedSubviews: [
+            self.destinationsScroll,
             self.textView,
             self.attachmentsRow,
             self.statusContainer,
@@ -236,9 +329,12 @@ final class ShareComposeView: UIView, UITextViewDelegate {
         self.addSubview(self.hairline)
         self.addSubview(contentStack)
 
+        self.destinationsScroll.addSubview(self.destinationsRow)
+
         for view in [
             header, self.cancelButton, self.titleLabel, self.hairline,
             self.placeholderLabel, self.statusStack, contentStack,
+            self.destinationsScroll, self.destinationsRow,
         ] {
             view.translatesAutoresizingMaskIntoConstraints = false
         }
@@ -267,6 +363,13 @@ final class ShareComposeView: UIView, UITextViewDelegate {
             self.textView.heightAnchor.constraint(greaterThanOrEqualToConstant: 72),
             self.attachmentsRow.heightAnchor.constraint(equalToConstant: Metric.thumbnailSize),
             self.sendButton.heightAnchor.constraint(equalToConstant: Metric.sendHeight),
+
+            self.destinationsScroll.heightAnchor.constraint(equalToConstant: Metric.destinationRowHeight),
+            self.destinationsRow.topAnchor.constraint(equalTo: self.destinationsScroll.contentLayoutGuide.topAnchor),
+            self.destinationsRow.bottomAnchor.constraint(equalTo: self.destinationsScroll.contentLayoutGuide.bottomAnchor),
+            self.destinationsRow.leadingAnchor.constraint(equalTo: self.destinationsScroll.contentLayoutGuide.leadingAnchor),
+            self.destinationsRow.trailingAnchor.constraint(equalTo: self.destinationsScroll.contentLayoutGuide.trailingAnchor),
+            self.destinationsRow.heightAnchor.constraint(equalTo: self.destinationsScroll.frameLayoutGuide.heightAnchor),
 
             self.placeholderLabel.topAnchor.constraint(
                 equalTo: self.textView.frameLayoutGuide.topAnchor,
