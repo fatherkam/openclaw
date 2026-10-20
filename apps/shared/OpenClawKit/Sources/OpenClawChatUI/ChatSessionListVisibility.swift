@@ -34,21 +34,21 @@ public enum OpenClawChatSessionListVisibility {
     /// operator-named or human-created run/internal rows remain chats.
     public static func isSystemCreatedSessionRow(_ entry: OpenClawChatSessionEntry) -> Bool {
         if entry.classification == "heartbeat" {
-            return Self.isBlank(entry.label) && Self.isBlank(entry.displayName)
-                && Self.isBlank(entry.subject)
+            return self.isBlank(entry.label) && self.isBlank(entry.displayName)
+                && self.isBlank(entry.subject)
         }
         if entry.createdActor?.type == "system" { return true }
         guard entry.createdVia == "run" || entry.createdVia == "internal",
               entry.createdActor?.type != "human"
         else { return false }
-        return Self.isBlank(entry.label) && Self.isBlank(entry.displayName)
-            && Self.isBlank(entry.subject)
+        return self.isBlank(entry.label) && self.isBlank(entry.displayName)
+            && self.isBlank(entry.subject)
     }
 
     /// Cron rows always belong to the automations scope; other system
     /// provenance follows the heartbeat-aware probe above.
     public static func isAutomationSession(_ entry: OpenClawChatSessionEntry) -> Bool {
-        Self.isCronSessionDisplayKey(entry.key) || Self.isSystemCreatedSessionRow(entry)
+        self.isCronSessionDisplayKey(entry.key) || self.isSystemCreatedSessionRow(entry)
     }
 
     /// Ordinary navigation lists keep the resolved selected session reachable
@@ -56,9 +56,10 @@ public enum OpenClawChatSessionListVisibility {
     /// predicate.
     public static func isVisibleInNavigation(
         _ entry: OpenClawChatSessionEntry,
-        selectedKey: String) -> Bool {
+        selectedKey: String) -> Bool
+    {
         entry.key == selectedKey
-            || (entry.archived != true && !Self.isAutomationSession(entry))
+            || (entry.archived != true && !self.isAutomationSession(entry))
     }
 
     private static func isBlank(_ value: String?) -> Bool {
