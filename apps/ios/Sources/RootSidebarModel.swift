@@ -230,8 +230,9 @@ final class RootSidebarModel {
         let queryIsEmpty = query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let browsingSessions = sessions.filter { entry in
             if entry.isSnoozed(at: now) { return false }
-            if !queryIsEmpty || entry.key == selectedSessionKey { return true }
-            return !OpenClawChatSessionListVisibility.isAutomationSession(entry)
+            if !queryIsEmpty { return true }
+            return OpenClawChatSessionListVisibility.isVisibleInNavigation(
+                entry, selectedKey: selectedSessionKey)
         }
         return ChatSessionSidebarModel.sections(
             sessions: browsingSessions,
