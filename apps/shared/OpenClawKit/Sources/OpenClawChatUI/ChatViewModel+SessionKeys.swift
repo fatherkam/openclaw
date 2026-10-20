@@ -365,10 +365,6 @@ extension OpenClawChatViewModel {
             guard !included.contains(entry.key) else { continue }
             guard entry.key == sessionKey || !ChatSessionSidebarModel.isHiddenInternalSession(entry.key)
             else { continue }
-            // Automation sessions stay out of the recent switcher unless selected.
-            guard entry.key == sessionKey
-                || !OpenClawChatSessionListVisibility.isAutomationSession(entry)
-            else { continue }
             // Pinned sessions stay reachable regardless of recency.
             guard (entry.updatedAt ?? 0) >= cutoff || entry.isPinned else { continue }
             result.append(entry)

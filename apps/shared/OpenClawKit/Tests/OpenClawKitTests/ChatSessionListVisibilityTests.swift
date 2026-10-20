@@ -10,7 +10,8 @@ struct ChatSessionListVisibilityTests {
         label: String? = nil,
         displayName: String? = nil,
         subject: String? = nil,
-        archived: Bool? = nil) throws -> OpenClawChatSessionEntry {
+        archived: Bool? = nil,
+        classification: String? = nil) throws -> OpenClawChatSessionEntry {
         try JSONDecoder().decode(
             OpenClawChatSessionEntry.self,
             from: Data("""
@@ -21,31 +22,19 @@ struct ChatSessionListVisibilityTests {
               "createdActor": \(createdActorType.map { "{\"type\":\"\($0)\"}" } ?? "null"),
               "label": \(label.map { "\"\($0)\"" } ?? "null"),
               "displayName": \(displayName.map { "\"\($0)\"" } ?? "null"),
-              "subject": \(subject.map { "\"\($0)\"" } ?? "null")
+              "subject": \(subject.map { "\"\($0)\"" } ?? "null"),
+              "classification": \(classification.map { "\"\($0)\"" } ?? "null")
             }
             """.utf8))
     }
 
-    @Test func `cron display keys match the shared web classifier shape`() {
-        for key in [
-            "cron:dreaming",
-            "agent:main:cron:dreaming",
-            "agent:rust-claw:cron:3cd2eb6f-b8a5-4db7-b74a-f6a3f7eab3d3",
-            "AGENT:MAIN:CRON:Dreaming",
-            " agent:main:cron:dreaming "
-        ] {
+    @Test func `cron keys and system provenance follow the shared web classifier`() {
+        // Full-shape contract is owned by ChatSessionSidebarModelTests via
+        // ViewOptions.includes; these canaries pin the navigation-side probe.
+        for key in ["cron:dreaming", "agent:main:cron:dreaming"] {
             #expect(OpenClawChatSessionListVisibility.isCronSessionDisplayKey(key))
         }
-        for key in [
-            "agent:main:cron",
-            "agent:main:cron:",
-            "agent:main:work",
-            "agent:main:subagent:cron:dreaming",
-            "main",
-            ""
-        ] {
-            #expect(!OpenClawChatSessionListVisibility.isCronSessionDisplayKey(key))
-        }
+        #expect(!OpenClawChatSessionListVisibility.isCronSessionDisplayKey("agent:main:work"))
     }
 
     @Test func `automation classification follows the android navigation predicate`() throws {
@@ -76,22 +65,36 @@ struct ChatSessionListVisibilityTests {
             try makeEntry(key: "agent:main:cron:dreaming", label: "Dreaming")))
         #expect(OpenClawChatSessionListVisibility.isAutomationSession(
             try makeEntry(key: "agent:main:job", createdActorType: "system", displayName: "Internal")))
+        // A named heartbeat outranks system provenance (web classifier :27);
+        // an unnamed heartbeat lane stays system.
+        #expect(!OpenClawChatSessionListVisibility.isAutomationSession(
+            try makeEntry(
+                key: "agent:main:nightly",
+                createdActorType: "system",
+                label: "Nightly",
+                subject: nil,
+                classification: "heartbeat")))
+        #expect(OpenClawChatSessionListVisibility.isAutomationSession(
+            try makeEntry(
+                key: "agent:main:nightly",
+                createdActorType: "system",
+                classification: "heartbeat")))
     }
 
-    @Test func `navigation visibility keeps the selected session reachable`() throws {
+    @Test func `navigation visibility keeps the resolved selected session reachable`() throws {
         let automation = try makeEntry(key: "agent:main:cron:dreaming")
         let chat = try makeEntry(key: "agent:main:slack:direct:+15555550123")
         let archivedChat = try makeEntry(key: "agent:main:old-chat", archived: true)
 
         #expect(!OpenClawChatSessionListVisibility.isVisibleInNavigation(
-            automation, currentSessionKey: "agent:main:chat"))
+            automation, selectedKey: "agent:main:chat"))
         #expect(OpenClawChatSessionListVisibility.isVisibleInNavigation(
-            automation, currentSessionKey: "agent:main:cron:dreaming"))
+            automation, selectedKey: "agent:main:cron:dreaming"))
         #expect(OpenClawChatSessionListVisibility.isVisibleInNavigation(
-            chat, currentSessionKey: "agent:main:chat"))
+            chat, selectedKey: "agent:main:chat"))
         #expect(!OpenClawChatSessionListVisibility.isVisibleInNavigation(
-            archivedChat, currentSessionKey: "agent:main:chat"))
+            archivedChat, selectedKey: "agent:main:chat"))
         #expect(OpenClawChatSessionListVisibility.isVisibleInNavigation(
-            archivedChat, currentSessionKey: "agent:main:old-chat"))
+            archivedChat, selectedKey: "agent:main:old-chat"))
     }
 }

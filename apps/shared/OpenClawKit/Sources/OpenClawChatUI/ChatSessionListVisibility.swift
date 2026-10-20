@@ -1,14 +1,14 @@
 import Foundation
 
-/// Shared classification for automation-owned session rows in ordinary
+/// Shared classification for automation and system session rows in ordinary
 /// navigation lists.
 ///
-/// Mirrors the canonical web classifier in
-/// `src/shared/session-list-visibility.ts` and the native Android adapter
-/// predicate in the Sessions screen (`isAutomationSession`): automation and
-/// cron sessions stay out of default lists while remaining discoverable
-/// through a dedicated automations scope and search. Display classification
-/// only; routing still validates canonical session keys separately.
+/// Single Swift owner for the probes shared by the sidebar filters
+/// (`ChatSessionSidebarModel.ViewOptions.includes`) and the iOS browsing
+/// policy, mirroring `src/shared/session-list-visibility.ts`: cron keys own
+/// automation even when system-created, a named heartbeat outranks system
+/// provenance, and operator-named run/internal lanes stay conversational.
+/// Display classification only; routing still validates canonical keys.
 public enum OpenClawChatSessionListVisibility {
     /// Display keys historically ignore empty segments and accept whitespace
     /// owners; match the shared web classifier's cron-key shape directly.
@@ -29,13 +29,15 @@ public enum OpenClawChatSessionListVisibility {
         return self.cronDisplayKeyRegex.firstMatch(in: normalized, range: range) != nil
     }
 
-    /// Cron rows belong to the automations scope; system-created rows and
-    /// unbranded run/internal provenance belong to it too. Legacy rows without
-    /// either and operator-named CLI sessions stay discoverable as chats.
-    public static func isAutomationSession(_ entry: OpenClawChatSessionEntry) -> Bool {
-        if Self.isCronSessionDisplayKey(entry.key) || entry.createdActor?.type == "system" {
-            return true
+    /// Non-cron system provenance probe. A named heartbeat lane stays
+    /// conversational (src/shared/session-list-visibility.ts:27) and
+    /// operator-named or human-created run/internal rows remain chats.
+    public static func isSystemCreatedSessionRow(_ entry: OpenClawChatSessionEntry) -> Bool {
+        if entry.classification == "heartbeat" {
+            return Self.isBlank(entry.label) && Self.isBlank(entry.displayName)
+                && Self.isBlank(entry.subject)
         }
+        if entry.createdActor?.type == "system" { return true }
         guard entry.createdVia == "run" || entry.createdVia == "internal",
               entry.createdActor?.type != "human"
         else { return false }
@@ -43,12 +45,19 @@ public enum OpenClawChatSessionListVisibility {
             && Self.isBlank(entry.subject)
     }
 
-    /// Ordinary navigation lists keep the selected session reachable even when
-    /// it is automation-created, mirroring the Android navigation predicate.
+    /// Cron rows always belong to the automations scope; other system
+    /// provenance follows the heartbeat-aware probe above.
+    public static func isAutomationSession(_ entry: OpenClawChatSessionEntry) -> Bool {
+        Self.isCronSessionDisplayKey(entry.key) || Self.isSystemCreatedSessionRow(entry)
+    }
+
+    /// Ordinary navigation lists keep the resolved selected session reachable
+    /// even when it is automation-created, mirroring the Android navigation
+    /// predicate.
     public static func isVisibleInNavigation(
         _ entry: OpenClawChatSessionEntry,
-        currentSessionKey: String) -> Bool {
-        entry.key == currentSessionKey
+        selectedKey: String) -> Bool {
+        entry.key == selectedKey
             || (entry.archived != true && !Self.isAutomationSession(entry))
     }
 
