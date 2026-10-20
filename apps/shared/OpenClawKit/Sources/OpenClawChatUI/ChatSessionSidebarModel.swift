@@ -164,6 +164,20 @@ public enum ChatSessionSidebarModel {
             ChatPayloadDecoding.trimmedNonEmptyString(session.agentId)?.lowercased()
     }
 
+    /// Ordinary navigation lists hide automation/cron sessions while keeping
+    /// the selected row reachable. Search and viewOptions-driven surfaces keep
+    /// their own visibility rules (Android parity: ui session-list-visibility).
+    private static func navigableEntries(
+        _ entries: [OpenClawChatSessionEntry],
+        viewOptions: ViewOptions?,
+        currentSessionKey: String) -> [OpenClawChatSessionEntry]
+    {
+        guard viewOptions == nil else { return entries }
+        return entries.filter {
+            OpenClawChatSessionListVisibility.isVisibleInNavigation($0, currentSessionKey: currentSessionKey)
+        }
+    }
+
     /// Omit main only when another navigation entry opens it. View options are
     /// opt-in so iOS, palettes, and other session-list consumers retain their defaults.
     @MainActor
@@ -211,14 +225,20 @@ public enum ChatSessionSidebarModel {
                 .prefix(10).flatMap { self.tree(from: [$0], identity: identity) }
             return nodes.isEmpty ? [] : [.init(id: "search", title: String(localized: "Search results"), nodes: nodes)]
         }
+        // Ordinary navigation lists hide automation/cron sessions (mirrors the
+        // Android Sessions screen and ui session-list-visibility). Search paths
+        // above keep them discoverable, and the selected session stays reachable.
+        let navigationEntries = Self.navigableEntries(
+            entries, viewOptions: viewOptions, currentSessionKey: currentSessionKey)
         let ordered: [OpenClawChatSessionEntry]
         let sort = viewOptions?.sort == .people && owners.map { $0.count < 2 } == true ? .created : viewOptions?.sort
         if sort == .created || sort == .people {
             var order = observedOrder
             order.observe(sessions.map(identity))
-            ordered = order.sortedByCreation(entries, owners: sort == .people ? owners ?? [] : nil, identity: identity)
+            ordered = order.sortedByCreation(
+                navigationEntries, owners: sort == .people ? owners ?? [] : nil, identity: identity)
         } else {
-            ordered = OpenClawChatSessionListOrganizer.organize(entries)
+            ordered = OpenClawChatSessionListOrganizer.organize(navigationEntries)
         }
         let visible = OpenClawChatSessionListOrganizer.filter(ordered, search: query)
         if let viewOptions {
