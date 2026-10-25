@@ -44,10 +44,13 @@ describe("memory embedding cache", () => {
       now?: number;
     } = {},
   ) {
-    const { identity: provider = defaultIdentity, ...rest } = options;
+    const { identity: provider = defaultIdentity, cacheSize, ...rest } = options;
     return upsertMemoryEmbeddingCache({
       db,
-      cacheSize: options.cacheSize ?? countMemoryEmbeddingCache(db),
+      cacheSize: {
+        size: cacheSize ?? countMemoryEmbeddingCache(db),
+        exact: cacheSize === undefined,
+      },
       provider: { id: provider.provider, model: provider.model },
       providerKey: provider.providerKey,
       entries: () => values.map(([hash, embedding]) => ({ hash, embedding })),
@@ -256,10 +259,19 @@ describe("memory embedding cache", () => {
     db.exec("BEGIN IMMEDIATE");
     const cacheSize = before.length;
     const reserved = cacheSize + 2 > maxEntries;
-    const executions = (["get", "all", "run", "iterate"] as const).map((method) =>
-      vi.spyOn(StatementSync.prototype, method),
-    );
-    let queries: string[];
+    const queries: string[] = [];
+    const executions = (["get", "all", "run", "iterate"] as const).map((method) => {
+      const original = StatementSync.prototype[method];
+      return vi.spyOn(StatementSync.prototype, method).mockImplementation(
+        new Proxy(original, {
+          apply(target, receiver: ReturnType<Database["prepare"]>, args) {
+            // The query owner may finalize the statement before write returns.
+            queries.push(receiver.sourceSQL);
+            return Reflect.apply(target, receiver, args);
+          },
+        }),
+      );
+    });
     try {
       write(
         db,
@@ -269,11 +281,6 @@ describe("memory embedding cache", () => {
           ["a", [4]],
         ],
         { cacheSize, maxEntries, now: 2 },
-      );
-      queries = executions.flatMap(({ mock }) =>
-        mock.contexts.flatMap((statement) =>
-          statement instanceof StatementSync ? [statement.sourceSQL] : [],
-        ),
       );
     } finally {
       for (const execution of executions) {
@@ -361,10 +368,16 @@ describe("memory embedding cache", () => {
     const hashes = Array.from({ length: 103 }, (_, index) => String(index));
     write(db, vectors(hashes, [1]), { now: 1 });
     db.exec("BEGIN IMMEDIATE");
-    expect(pruneMemoryEmbeddingCache(db, 103, 2)).toBe(3);
+    expect(pruneMemoryEmbeddingCache(db, { size: 103, exact: true }, 2)).toEqual({
+      size: 3,
+      exact: true,
+    });
     expect(read()).toEqual(["100", "101", "102"].map((hash) => ({ hash })));
     db.exec("COMMIT; BEGIN IMMEDIATE");
-    expect(pruneMemoryEmbeddingCache(db, 3, 2)).toBe(2);
+    expect(pruneMemoryEmbeddingCache(db, { size: 3, exact: true }, 2)).toEqual({
+      size: 2,
+      exact: true,
+    });
     db.exec("COMMIT");
     expect(read()).toEqual(["101", "102"].map((hash) => ({ hash })));
   });
@@ -416,10 +429,16 @@ describe("memory embedding cache", () => {
     const preference = { identities: [{ provider: "openai", model: "m", providerKey: "k" }] };
 
     // Seven rows against a cap of six: one eviction, the oldest preferred row.
-    expect(pruneMemoryEmbeddingCache(db, 7, 6, preference)).toBe(6);
+    expect(pruneMemoryEmbeddingCache(db, { size: 7, exact: true }, 6, preference)).toEqual({
+      size: 6,
+      exact: true,
+    });
     expect(remaining()).not.toContain("orphan-older");
     // Two more evictions: one preferred row remains, then plain oldest-first.
-    expect(pruneMemoryEmbeddingCache(db, 6, 4, preference)).toBe(4);
+    expect(pruneMemoryEmbeddingCache(db, { size: 6, exact: true }, 4, preference)).toEqual({
+      size: 4,
+      exact: true,
+    });
     expect(remaining()).toEqual([
       "live-session",
       "orphan-other-key",
@@ -442,7 +461,7 @@ describe("memory embedding cache", () => {
     );
     upsertMemoryEmbeddingCache({
       db,
-      cacheSize: 3,
+      cacheSize: { size: 3, exact: true },
       provider: { id: "openai", model: "m" },
       providerKey: "k",
       entries: () => [{ hash: "new", embedding: [0.3, 0.4] }],
@@ -469,7 +488,7 @@ describe("memory embedding cache", () => {
         ],
         published ? [["live", 10]] : [],
       );
-      pruneMemoryEmbeddingCache(db, 4, maxEntries, { identities });
+      pruneMemoryEmbeddingCache(db, { size: 4, exact: true }, maxEntries, { identities });
       return remaining();
     };
     const a = identity("m", "k", "openai");

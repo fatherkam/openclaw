@@ -50,10 +50,6 @@ extension ChatSessionSidebarModel {
         }
 
         func includes(_ session: OpenClawChatSessionEntry) -> Bool {
-            // Port src/shared/session-list-visibility.ts via the shared Swift
-            // probes: cron keys own automation even when system-created; a
-            // named heartbeat outranks system provenance; other probes use
-            // provenance, never titles.
             if OpenClawChatSessionListVisibility.isCronSessionDisplayKey(session.key) {
                 return self.showAutomation
             }

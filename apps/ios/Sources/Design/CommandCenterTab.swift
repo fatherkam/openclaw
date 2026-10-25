@@ -732,11 +732,8 @@ enum SessionStatusScope: String, CaseIterable {
     {
         switch self {
         case .active:
-            // The selected session stays reachable even when it is automation-
-            // created, mirroring the Android navigation predicate.
-            !session.isSnoozed(at: now) && (session.key == currentSessionKey
-                || (session.archived != true
-                    && !OpenClawChatSessionListVisibility.isAutomationSession(session)))
+            session.archived != true && !session.isSnoozed(at: now) &&
+                (session.key == currentSessionKey || !OpenClawChatSessionListVisibility.isAutomationSession(session))
         case .snoozed: session.archived != true && session.isSnoozed(at: now)
         case .automations:
             session.archived != true && OpenClawChatSessionListVisibility.isAutomationSession(session)

@@ -9,56 +9,23 @@ struct CommandCenterTabSessionFilterTests {
         #expect(SessionStatusScope.available(isConnected: true) == [.active, .snoozed, .automations, .archived])
     }
 
-    @Test func `automation sessions leave active and gather under the automations scope`() throws {
+    @Test func `automation scope preserves selection without leaking archived sessions into active`() throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let entries = try JSONDecoder().decode([OpenClawChatSessionEntry].self, from: Data("""
         [
-          {"key":"agent:main:cron:dreaming"},
-          {"key":"agent:main:cron:health","archived":true},
-          {"key":"cron:standalone"},
-          {"key":"agent:main:sys-created","createdActor":{"type":"system"}},
-          {"key":"agent:main:run-created","createdVia":"run"},
-          {"key":"agent:main:internal-labeled","createdVia":"internal","createdActor":{"type":"agent"},"label":"Ops notes"},
-          {"key":"agent:main:human-run","createdVia":"run","createdActor":{"type":"human","id":"u1"},"displayName":"Team chat"},
-          {"key":"agent:main:plain-chat"}
+          {"key":"agent:main:cron:daily"},
+          {"key":"agent:main:cron:archived","archived":true},
+          {"key":"conversation"}
         ]
         """.utf8))
-
-        let active = entries.filter { SessionStatusScope.active.includes($0, at: now) }
-        #expect(active.map(\.key) == [
-            "agent:main:internal-labeled",
-            "agent:main:human-run",
-            "agent:main:plain-chat",
-        ])
-        #expect(entries.filter { SessionStatusScope.automations.includes($0, at: now) }.map(\.key) == [
-            "agent:main:cron:dreaming",
-            "cron:standalone",
-            "agent:main:sys-created",
-            "agent:main:run-created",
-        ])
-        #expect(entries.filter { SessionStatusScope.archived.includes($0, at: now) }.map(\.key) == [
-            "agent:main:cron:health",
-        ])
-    }
-
-    @Test func `selected automation session stays reachable in the active scope`() throws {
-        let now = Date(timeIntervalSince1970: 1_800_000_000)
-        let entries = try JSONDecoder().decode([OpenClawChatSessionEntry].self, from: Data("""
-        [
-          {"key":"agent:main:cron:dreaming"},
-          {"key":"agent:main:plain-chat"}
-        ]
-        """.utf8))
-
-        let active = entries.filter {
-            SessionStatusScope.active.includes($0, at: now, currentSessionKey: "agent:main:cron:dreaming")
+        func keys(_ scope: SessionStatusScope, selected: String? = nil) -> [String] {
+            entries.filter { scope.includes($0, at: now, currentSessionKey: selected) }.map(\.key)
         }
-        #expect(active.map(\.key) == ["agent:main:cron:dreaming", "agent:main:plain-chat"])
-        // The exception is keyed to the selected session only.
-        let withoutSelection = entries.filter {
-            SessionStatusScope.active.includes($0, at: now, currentSessionKey: "agent:main:plain-chat")
-        }
-        #expect(withoutSelection.map(\.key) == ["agent:main:plain-chat"])
+        #expect(keys(.active) == ["conversation"])
+        #expect(keys(.active, selected: "agent:main:cron:daily") == ["agent:main:cron:daily", "conversation"])
+        #expect(keys(.active, selected: "agent:main:cron:archived") == ["conversation"])
+        #expect(keys(.automations) == ["agent:main:cron:daily"])
+        #expect(keys(.archived) == ["agent:main:cron:archived"])
     }
 
     @Test func `status scopes separate future snoozes and archives while expired snoozes return to active`() throws {
