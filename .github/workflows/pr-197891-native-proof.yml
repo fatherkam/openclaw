@@ -1,0 +1,44 @@
+name: PR 197891 isolated native proof
+on:
+  push:
+    branches: [proof/pr-197891-native-20261112]
+permissions:
+  contents: read
+jobs:
+  native-session-shortcuts:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ff119314642c463ae0c909546862c2716354331f
+          persist-credentials: false
+      - name: Verify source and native toolchain
+        run: |
+          test "$(git rev-parse HEAD)" = ff119314642c463ae0c909546862c2716354331f
+          source scripts/lib/swift-toolchain.sh
+          select_xcode_toolchain
+          sw_vers
+          xcodebuild -version
+          swift --version
+      - uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "24.22.1"
+          install-bun: "false"
+          cache-mode: off
+      - name: Prepare native assets
+        run: node scripts/prepare-apple-mermaid.mjs
+      - name: Compile actual app test bundle
+        run: swift build --package-path apps/macos --build-system native --disable-index-store --build-tests
+      - name: Exercise native dashboard shortcut delivery
+        run: |
+          set -o pipefail
+          node scripts/test-macos-native.mts default --package-path apps/macos --build-system native --skip-build --filter DashboardSessionShortcutDeliveryTests 2>&1 | tee "$RUNNER_TEMP/native-session-proof.log"
+      - name: Retain focused evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: native-session-shortcut-proof
+          path: ${{ runner.temp }}/native-session-proof.log
+          if-no-files-found: ignore
+          retention-days: 7
